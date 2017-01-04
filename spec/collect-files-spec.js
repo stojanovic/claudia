@@ -10,6 +10,8 @@ describe('collectFiles', function () {
 	'use strict';
 	var destdir, sourcedir, pwd,
 		configurePackage = function (packageConf) {
+			packageConf.name = packageConf.name  || 'testproj';
+			packageConf.version = packageConf.version  || '1.0.0';
 			fs.writeFileSync(path.join(sourcedir, 'package.json'), JSON.stringify(packageConf), 'utf8');
 		},
 		isSameDir = function (dir1, dir2) {
@@ -71,7 +73,7 @@ describe('collectFiles', function () {
 			}, done.fail);
 		});
 		it('works when files is a single string', function (done) {
-			configurePackage({files: 'roo*'});
+			configurePackage({files: ['root.txt']});
 			underTest(sourcedir).then(function (packagePath) {
 				destdir = packagePath;
 				expect(shell.test('-e', path.join(packagePath, 'root.txt'))).toBeTruthy();
@@ -142,7 +144,7 @@ describe('collectFiles', function () {
 
 			});
 		});
-		['.gitignore', '.somename.swp', '._somefile', '.DS_Store', '.npmrc', 'npm-debug.log', 'config.gypi'].forEach(function (fileName) {
+		['.gitignore', '.somename.swp', '._somefile', '.DS_Store', 'npm-debug.log'].forEach(function (fileName) {
 			it('excludes ' + fileName + ' file from the package', function (done) {
 				fs.writeFileSync(path.join(sourcedir, fileName), 'text2', 'utf8');
 				configurePackage({});
@@ -152,6 +154,15 @@ describe('collectFiles', function () {
 				}).then(done, done.fail);
 
 			});
+		});
+		it('leaves .npmrc if it exists', function (done) {
+			var fileName = '.npmrc';
+			fs.writeFileSync(path.join(sourcedir, fileName), 'text2', 'utf8');
+			configurePackage({});
+			underTest(sourcedir).then(function (packagePath) {
+				destdir = packagePath;
+				expect(shell.test('-e', path.join(packagePath, fileName))).toBeTruthy();
+			}).then(done, done.fail);
 		});
 		['.gitignore', '.npmignore'].forEach(function (fileName) {
 			it('ignores the wildcard contents specified in ' + fileName, function (done) {
@@ -187,56 +198,139 @@ describe('collectFiles', function () {
 			});
 		});
 	});
-	it('collects production npm dependencies if package config includes the dependencies flag', function (done) {
-		configurePackage({
-			files: ['root.txt'],
-			dependencies: {
-				'uuid': '^2.0.0'
-			},
-			devDependencies: {
-				'minimist': '^1.2.0'
-			}
+	describe('collecting dependencies', function () {
+		beforeEach(function () {
+			shell.mkdir(path.join(sourcedir, 'node_modules'));
+			shell.mkdir('-p', path.join(sourcedir, 'node_modules', 'old-mod'));
+			fs.writeFileSync(path.join(sourcedir, 'node_modules', 'old-mod', 'old.txt'), 'old-content', 'utf8');
 		});
+		it('collects production npm dependencies if package config includes the dependencies object', function (done) {
+			configurePackage({
+				files: ['root.txt'],
+				dependencies: {
+					'uuid': '^2.0.0'
+				},
+				devDependencies: {
+					'minimist': '^1.2.0'
+				}
+			});
+			underTest(sourcedir).then(function (packagePath) {
+				destdir = packagePath;
+				expect(shell.test('-e', path.join(packagePath, 'node_modules', 'uuid'))).toBeTruthy();
+				expect(shell.test('-e', path.join(packagePath, 'node_modules', 'minimist'))).toBeFalsy();
+				expect(shell.test('-e', path.join(packagePath, 'node_modules', 'old-mod'))).toBeFalsy();
+				done();
+			}, done.fail);
+		});
+		it('uses the local .npmrc file if it exists', function (done) {
+			configurePackage({
+				files: ['root.txt'],
+				dependencies: {
+					'uuid': '^2.0.0'
+				},
+				optionalDependencies: {
+					'minimist': '^1.2.0'
+				}
+			});
+			fs.writeFileSync(path.join(sourcedir, '.npmrc'), 'optional = false', 'utf8');
+			underTest(sourcedir).then(function (packagePath) {
+				destdir = packagePath;
+				expect(shell.test('-e', path.join(packagePath, 'node_modules', 'uuid'))).toBeTruthy();
+				expect(shell.test('-e', path.join(packagePath, 'node_modules', 'minimist'))).toBeFalsy();
+				expect(shell.test('-e', path.join(packagePath, 'node_modules', 'old-mod'))).toBeFalsy();
+				done();
+			}, done.fail);
+		});
+		it('uses local node_modules instead of running npm install if localDependencies is set to true', function (done) {
+			configurePackage({
+				dependencies: {
+					'uuid': '^2.0.0'
+				},
+				devDependencies: {
+					'minimist': '^1.2.0'
+				}
+			});
+			underTest(sourcedir, true).then(function (packagePath) {
+				destdir = packagePath;
+				expect(shell.test('-e', path.join(packagePath, 'node_modules', 'uuid'))).toBeFalsy();
+				expect(shell.test('-e', path.join(packagePath, 'node_modules', 'old-mod'))).toBeTruthy();
+				done();
+			}, done.fail);
+		});
+		it('uses local node_modules when localDependencie is set to true, even when only specific files are requested', function (done) {
+			configurePackage({
+				files: ['root.txt'],
+				dependencies: {
+					'uuid': '^2.0.0'
+				},
+				devDependencies: {
+					'minimist': '^1.2.0'
+				}
+			});
+			underTest(sourcedir, true).then(function (packagePath) {
+				destdir = packagePath;
+				expect(shell.test('-e', path.join(packagePath, 'node_modules', 'uuid'))).toBeFalsy();
+				expect(shell.test('-e', path.join(packagePath, 'node_modules', 'old-mod'))).toBeTruthy();
+				done();
+			}, done.fail);
+		});
+
+		it('fails if npm install fails', function (done) {
+			configurePackage({
+				files: ['root.txt'],
+				dependencies: {
+					'non-existing-package': '2.0.0'
+				}
+			});
+			underTest(sourcedir).then(done.fail, function (reason) {
+				expect(reason).toMatch(/npm install --production failed/);
+				done();
+			});
+		});
+		it('does not change the current working dir', function (done) {
+			configurePackage({files: ['roo*', 'subdir']});
+			underTest(sourcedir).then(function () {
+				expect(shell.pwd()).toEqual(pwd);
+				done();
+			}, done.fail);
+		});
+		it('does not change the current working dir even if npm install fails', function (done) {
+			configurePackage({
+				files: ['root.txt'],
+				dependencies: {
+					'non-existing-package': '2.0.0'
+				}
+			});
+			underTest(sourcedir).then(done.fail, function () {
+				expect(shell.pwd()).toEqual(pwd);
+				done();
+			});
+		});
+	});
+	it('works with scoped packages', function (done) {
+		configurePackage({name: '@test/packname'});
 		underTest(sourcedir).then(function (packagePath) {
 			destdir = packagePath;
-			expect(shell.test('-e', path.join(packagePath, 'node_modules', 'uuid'))).toBeTruthy();
-			expect(shell.test('-e', path.join(packagePath, 'node_modules', 'minimist'))).toBeFalsy();
-			done();
-		}, done.fail);
-
+			expect(isSameDir(path.dirname(packagePath), os.tmpdir())).toBeTruthy();
+			expect(fs.readFileSync(path.join(packagePath, 'root.txt'), 'utf8')).toEqual('text1');
+			expect(fs.readFileSync(path.join(packagePath, 'subdir', 'sub.txt'), 'utf8')).toEqual('text2');
+			expect(fs.readFileSync(path.join(packagePath, 'excluded.txt'), 'utf8')).toEqual('excl1');
+		}).then(done, done.fail);
 	});
-	it('fails if npm install fails', function (done) {
-		configurePackage({
-			files: ['root.txt'],
-			dependencies: {
-				'non-existing-package': '2.0.0'
-			}
-		});
-		underTest(sourcedir).then(done.fail, function (reason) {
-			expect(/^npm install --production failed/.test(reason)).toBeTruthy();
-			done();
-		});
+	it('works with folders containing a space', function (done) {
+		var oldsource = sourcedir;
+		sourcedir = oldsource + ' with space';
+		shell.mv(oldsource, sourcedir);
+		configurePackage({name: 'test123'});
+		underTest(sourcedir).then(function (packagePath) {
+			destdir = packagePath;
+			expect(isSameDir(path.dirname(packagePath), os.tmpdir())).toBeTruthy();
+			expect(fs.readFileSync(path.join(packagePath, 'root.txt'), 'utf8')).toEqual('text1');
+			expect(fs.readFileSync(path.join(packagePath, 'subdir', 'sub.txt'), 'utf8')).toEqual('text2');
+			expect(fs.readFileSync(path.join(packagePath, 'excluded.txt'), 'utf8')).toEqual('excl1');
+			sourcedir = oldsource;
+		}).then(done, done.fail);
 	});
-	it('does not change the current working dir', function (done) {
-		configurePackage({files: ['roo*', 'subdir']});
-		underTest(sourcedir).then(function () {
-			expect(shell.pwd()).toEqual(pwd);
-			done();
-		}, done.fail);
-	});
-	it('does not change the current working dir even if npm install fails', function (done) {
-		configurePackage({
-			files: ['root.txt'],
-			dependencies: {
-				'non-existing-package': '2.0.0'
-			}
-		});
-		underTest(sourcedir).then(done.fail, function () {
-			expect(shell.pwd()).toEqual(pwd);
-			done();
-		});
-	});
-
 
 	it('logs progress', function (done) {
 		var logger = new ArrayLogger();
@@ -246,23 +340,10 @@ describe('collectFiles', function () {
 				'uuid': '^2.0.0'
 			}
 		});
-		underTest(sourcedir, logger).then(function () {
+		underTest(sourcedir, false, logger).then(function () {
 			expect(logger.getCombinedLog()).toEqual([
 				['stage', 'packaging files'],
-				['call', 'cp', 'package.json'],
-				['call', 'cp', 'root.txt'],
-				['call', 'rm', 'node_modules'],
-				['call', 'rm', '.git'],
-				['call', 'rm', '.gitignore'],
-				['call', 'rm', '*.swp'],
-				['call', 'rm', '._*'],
-				['call', 'rm', '.DS_Store'],
-				['call', 'rm', '.hg'],
-				['call', 'rm', '.npmrc'],
-				['call', 'rm', '.svn'],
-				['call', 'rm', 'config.gypi'],
-				['call', 'rm', 'CVS'],
-				['call', 'rm', 'npm-debug.log'],
+				['call', 'npm pack "' + sourcedir + '"'],
 				['call', 'npm install --production']
 			]);
 		}).then(done, done.fail);

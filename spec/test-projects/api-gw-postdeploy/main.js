@@ -2,8 +2,8 @@
 exports.apiConfig = function () {
 	'use strict';
 	return {
-		version: 2,
-		routes: { hello: { 'GET' : {} }}
+		version: 3,
+		routes: { hello: { 'GET': {} }}
 	};
 };
 exports.postDeploy = function (options, lambdaDetails, utils) {
@@ -24,10 +24,19 @@ exports.postDeploy = function (options, lambdaDetails, utils) {
 		}
 	};
 	return utils.apiGatewayPromise.createDeploymentPromise(deployment).then(function () {
-		return options.postresult;
+		return {
+			result: options.postresult,
+			wasApiCacheUsed: !!lambdaDetails.apiCacheReused
+		};
 	});
 };
-exports.router = function (event, context) {
+exports.proxyRouter = function (event, context) {
 	'use strict';
-	context.succeed(event.env);
+	context.succeed({
+		body: JSON.stringify(event.stageVariables),
+		headers: {
+			'Content-Type': 'application/json'
+		},
+		statusCode: 200
+	});
 };

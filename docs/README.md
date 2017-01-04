@@ -17,12 +17,15 @@ claudia [command] {OPTIONS}
 * [`add-scheduled-event`](add-scheduled-event.md) Add a recurring notification event
 * [`test-lambda`](test-lambda.md) Execute the lambda function and print out the response
 * [`destroy`](destroy.md) Undeploy the lambda function and destroy the API and security roles
+* [`generate-serverless-express-proxy`](generate-serverless-express-proxy.md) Create a lambda proxy API wrapper for an express app using aws-serverless-express
 
 ## Options:
 
  * --help           print this help screen
  * --version        print out the current version
  * --quiet          suppress output when executing commands
+ * --profile        set AWS credentials profile
+ * --aws-client-timeout The number of milliseconds to wait before connection time out on AWS SDK Client. Defaults to two minutes (120000)
 
 Run with a command name to see options of a specific command, for example:
 ```bash

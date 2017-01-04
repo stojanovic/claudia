@@ -1,21 +1,19 @@
-/*global module, require*/
-var shell = require('shelljs'),
-	fs = require('fs'),
-	Promise = require('bluebird'),
-	readFile = Promise.promisify(fs.readFile);
+/*global module, require, Promise*/
+var fs = require('./fs-promise'),
+	fsUtil = require('./fs-util');
 module.exports = function readJSON(fileName) {
 	'use strict';
 	if (!fileName) {
 		return Promise.reject('file name not provided');
 	}
-	if (!shell.test('-e', fileName)) {
+	if (!fsUtil.fileExists(fileName)) {
 		return Promise.reject(fileName + ' is missing');
 	}
-	return readFile(fileName, {encoding: 'utf8'}).then(function (content) {
+	return fs.readFileAsync(fileName, {encoding: 'utf8'}).then(function (content) {
 		try {
 			return JSON.parse(content);
 		} catch (e) {
-			throw('invalid configuration in ' + fileName);
+			throw 'invalid configuration in ' + fileName;
 		}
 	});
 };

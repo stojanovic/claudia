@@ -1,7 +1,6 @@
-/*global module, require */
+/*global module, require, Promise */
 var loadConfig = require('../util/loadconfig'),
-	Promise = require('bluebird'),
-	fs = Promise.promisifyAll(require('fs')),
+	fs = require('../util/fs-promise'),
 	aws = require('aws-sdk');
 
 module.exports = function addScheduledEvent(options) {
@@ -12,14 +11,14 @@ module.exports = function addScheduledEvent(options) {
 		eventData,
 		ruleArn,
 		initServices = function () {
-			lambda = Promise.promisifyAll(new aws.Lambda({region: lambdaConfig.region}), {suffix: 'Promise'});
-			events = Promise.promisifyAll(new aws.CloudWatchEvents({region: lambdaConfig.region}));
+			lambda = new aws.Lambda({region: lambdaConfig.region});
+			events = new aws.CloudWatchEvents({region: lambdaConfig.region});
 		},
 		getLambda = function () {
-			return lambda.getFunctionConfigurationPromise({FunctionName: lambdaConfig.name, Qualifier: options.version});
+			return lambda.getFunctionConfiguration({FunctionName: lambdaConfig.name, Qualifier: options.version}).promise();
 		},
 		readConfig = function () {
-			return loadConfig(options, {lambda: {name: true, region: true, role: true}})
+			return loadConfig(options, {lambda: {name: true, region: true}})
 				.then(function (config) {
 					lambdaConfig = config.lambda;
 				}).then(initServices)
@@ -30,23 +29,23 @@ module.exports = function addScheduledEvent(options) {
 				});
 		},
 		addInvokePermission = function () {
-			return lambda.addPermissionPromise({
+			return lambda.addPermission({
 				Action: 'lambda:InvokeFunction',
 				FunctionName: lambdaConfig.name,
 				Principal: 'events.amazonaws.com',
 				SourceArn: ruleArn,
 				Qualifier: options.version,
-				StatementId:  options.name  + '-access-' + Date.now()
-			});
+				StatementId: options.name  + '-access-' + Date.now()
+			}).promise();
 		},
 		createRule = function () {
-			return events.putRuleAsync({
+			return events.putRule({
 				Name: options.name,
 				ScheduleExpression: options.schedule
-			});
+			}).promise();
 		},
 		addRuleTarget = function () {
-			return events.putTargetsAsync({
+			return events.putTargets({
 				Rule: options.name,
 				Targets: [
 					{
@@ -55,7 +54,7 @@ module.exports = function addScheduledEvent(options) {
 						Input: eventData
 					}
 				]
-			});
+			}).promise();
 		};
 	if (options.rate) {
 		options.schedule = 'rate(' + options.rate + ')';
@@ -104,14 +103,14 @@ module.exports.doc = {
 		{
 			argument: 'rate',
 			optional: true,
-			description: 'a shorthand for rate-based expressions, without the brackets\n' +
+			description: 'a shorthand for rate-based expressions, without the brackets.\n' +
 				'If this is specified, the schedule argument is not required/ignored',
 			example: '5 minutes'
 		},
 		{
 			argument: 'cron',
 			optional: true,
-			description: 'a shorthand for cron-based expressions, without the brackets\n' +
+			description: 'a shorthand for cron-based expressions, without the brackets.\n' +
 				'If this is specified, the schedule argument is not required/ignored',
 			example: '0 8 1 * ? *'
 		},

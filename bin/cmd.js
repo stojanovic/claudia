@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-'use strict';
 /* global process, __dirname, require, console */
 var minimist = require('minimist'),
 	shell = require('shelljs'),
@@ -7,15 +6,18 @@ var minimist = require('minimist'),
 	readCommands = require('../src/util/read-commands'),
 	ConsoleLogger = require('../src/util/console-logger'),
 	docTxt = require('../src/util/doc-txt'),
+	AWS = require('aws-sdk'),
 	readArgs = function () {
+		'use strict';
 		return minimist(process.argv.slice(2), {
 			alias: { h: 'help', v: 'version' },
-			string: ['source', 'name', 'region'],
+			string: ['source', 'name', 'region', 'profile'],
 			boolean: ['quiet'],
-			default: { 'source': shell.pwd() }
+			default: { 'source': shell.pwd().toString() }
 		});
 	},
 	main = function () {
+		'use strict';
 		var args = readArgs(),
 			commands = readCommands(),
 			command = args._ && args._.length && args._[0],
@@ -43,7 +45,12 @@ var minimist = require('minimist'),
 			process.exit(1);
 			return;
 		}
-
+		if (args.profile) {
+			AWS.config.credentials = new AWS.SharedIniFileCredentials({profile: args.profile});
+		}
+		if (args['aws-client-timeout']) {
+			AWS.config.httpOptions = { timeout: args['aws-client-timeout'] };
+		}
 		commands[command](args, logger).then(function (result) {
 			if (result) {
 				console.log(JSON.stringify(result, null, 2));

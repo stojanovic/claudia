@@ -1,77 +1,129 @@
-/*global module, require, console*/
-var Promise = require('bluebird'),
-	zipdir = require('../tasks/zipdir'),
+/*global module, require, console, Promise, process*/
+var zipdir = require('../tasks/zipdir'),
 	collectFiles = require('../tasks/collect-files'),
-	fs = require('fs'),
+	os = require('os'),
 	path = require('path'),
-	readFile = Promise.promisify(fs.readFile),
+	cleanUpPackage = require('../tasks/clean-up-package'),
 	aws = require('aws-sdk'),
-	shell = require('shelljs'),
+	allowApiInvocation = require('../tasks/allow-api-invocation'),
+	lambdaCode = require('../tasks/lambda-code'),
 	markAlias = require('../tasks/mark-alias'),
 	retriableWrap = require('../util/retriable-wrap'),
 	rebuildWebApi = require('../tasks/rebuild-web-api'),
 	validatePackage = require('../tasks/validate-package'),
 	apiGWUrl = require('../util/apigw-url'),
-	promiseWrap = require('../util/promise-wrap'),
+	sequentialPromiseMap = require('../util/sequential-promise-map'),
+	loggingWrap = require('../util/logging-wrap'),
+	readEnvVarsFromOptions = require('../util/read-env-vars-from-options'),
 	NullLogger = require('../util/null-logger'),
+	updateEnvVars = require('../tasks/update-env-vars'),
+	getOwnerId = require('../tasks/get-owner-account-id'),
+	fs = require('fs'),
 	loadConfig = require('../util/loadconfig');
 module.exports = function update(options, optionalLogger) {
 	'use strict';
 	var logger = optionalLogger || new NullLogger(),
 		lambda, apiGateway, lambdaConfig, apiConfig, updateResult,
 		functionConfig,
-		alias = options.version || 'latest',
+		alias = (options && options.version) || 'latest',
 		packageDir,
-		updateWebApi = function () {
+		updateProxyApi = function () {
+			return getOwnerId(logger).then(function (ownerId) {
+				return allowApiInvocation(lambdaConfig.name, alias, apiConfig.id, ownerId, lambdaConfig.region);
+			}).then(function () {
+				return apiGateway.createDeploymentPromise({
+					restApiId: apiConfig.id,
+					stageName: alias,
+					variables: {
+						lambdaVersion: alias
+					}
+				});
+			});
+		},
+		updateClaudiaApiBuilderApi = function () {
 			var apiModule, apiDef, apiModulePath;
-			if (apiConfig && apiConfig.id && apiConfig.module) {
-				logger.logStage('updating REST API');
-				try {
-					apiModulePath = path.resolve(path.join(packageDir, apiConfig.module));
-					apiModule = require(apiModulePath);
-					apiDef = apiModule.apiConfig();
-				} catch (e) {
-					console.error(e.stack || e);
-					return Promise.reject('cannot load api config from ' + apiModulePath);
-				}
-				updateResult.url = apiGWUrl(apiConfig.id, lambdaConfig.region, alias);
-				return rebuildWebApi(lambdaConfig.name, alias, apiConfig.id, apiDef, lambdaConfig.region, logger)
-					.then(function () {
-						if (apiModule.postDeploy) {
-							return apiModule.postDeploy(
-								options,
-								{
-									name: lambdaConfig.name,
-									alias: alias,
-									apiId: apiConfig.id,
-									apiUrl: updateResult.url,
-									region: lambdaConfig.region
-								},
-								{
-									apiGatewayPromise: apiGateway,
-									aws: aws,
-									Promise: Promise
-								}
-							);
-						}
-					}).then(function (postDeployResult) {
-						if (postDeployResult) {
-							updateResult.deploy = postDeployResult;
-						}
-					});
+			try {
+				apiModulePath = path.resolve(path.join(packageDir, apiConfig.module));
+				apiModule = require(apiModulePath);
+				apiDef = apiModule.apiConfig();
+			} catch (e) {
+				console.error(e.stack || e);
+				return Promise.reject('cannot load api config from ' + apiModulePath);
 			}
-		};
+
+			return rebuildWebApi(lambdaConfig.name, alias, apiConfig.id, apiDef, lambdaConfig.region, logger, options['cache-api-config'])
+				.then(function (rebuildResult) {
+					if (apiModule.postDeploy) {
+						Promise.map = sequentialPromiseMap;
+						return apiModule.postDeploy(
+							options,
+							{
+								name: lambdaConfig.name,
+								alias: alias,
+								apiId: apiConfig.id,
+								apiUrl: updateResult.url,
+								region: lambdaConfig.region,
+								apiCacheReused: rebuildResult.cacheReused
+							},
+							{
+								apiGatewayPromise: apiGateway,
+								aws: aws,
+								Promise: Promise
+							}
+						);
+					}
+				}).then(function (postDeployResult) {
+					if (postDeployResult) {
+						updateResult.deploy = postDeployResult;
+					}
+				});
+		},
+		updateWebApi = function () {
+			if (apiConfig && apiConfig.id) {
+				logger.logStage('updating REST API');
+				updateResult.url = apiGWUrl(apiConfig.id, lambdaConfig.region, alias);
+				if (apiConfig.module) {
+					return updateClaudiaApiBuilderApi();
+				} else {
+					return updateProxyApi();
+				}
+			}
+		},
+		packageArchive,
+		cleanup = function () {
+			if (!options.keep) {
+				fs.unlinkSync(packageArchive);
+			} else {
+				updateResult.archive = packageArchive;
+			}
+			return updateResult;
+		},
+		requiresHandlerUpdate = false,
+		s3Key;
 	options = options || {};
 	if (!options.source) {
-		options.source = shell.pwd();
+		options.source = process.cwd();
 	}
+	if (options.source === os.tmpdir()) {
+		return Promise.reject('Source directory is the Node temp directory. Cowardly refusing to fill up disk with recursive copy.');
+	}
+	if (options['optional-dependencies'] === false && options['use-local-dependencies']) {
+		return Promise.reject('incompatible arguments --use-local-dependencies and --no-optional-dependencies');
+	}
+	try {
+		readEnvVarsFromOptions(options);
+	} catch (e) {
+		return Promise.reject(e);
+	}
+
+
 	logger.logStage('loading Lambda config');
 	return loadConfig(options, {lambda: {name: true, region: true}}).then(function (config) {
 		lambdaConfig = config.lambda;
 		apiConfig = config.api;
-		lambda = promiseWrap(new aws.Lambda({region: lambdaConfig.region}), {log: logger.logApiCall, logName: 'lambda'});
+		lambda = loggingWrap(new aws.Lambda({region: lambdaConfig.region}), {log: logger.logApiCall, logName: 'lambda'});
 		apiGateway = retriableWrap(
-				promiseWrap(
+				loggingWrap(
 					new aws.APIGateway({region: lambdaConfig.region}),
 					{log: logger.logApiCall, logName: 'apigateway'}
 				),
@@ -80,37 +132,56 @@ module.exports = function update(options, optionalLogger) {
 				}
 		);
 	}).then(function () {
-		return lambda.getFunctionConfigurationPromise({FunctionName: lambdaConfig.name});
+		return lambda.getFunctionConfiguration({FunctionName: lambdaConfig.name}).promise();
 	}).then(function (result) {
 		functionConfig = result;
+		requiresHandlerUpdate = apiConfig && apiConfig.id && /\.router$/.test(functionConfig.Handler);
+		if (requiresHandlerUpdate) {
+			functionConfig.Handler = functionConfig.Handler.replace(/\.router$/, '.proxyRouter');
+		}
 	}).then(function () {
 		if (apiConfig) {
 			return apiGateway.getRestApiPromise({restApiId: apiConfig.id});
 		}
 	}).then(function () {
-		return collectFiles(options.source, logger);
+		return collectFiles(options.source, options['use-local-dependencies'], logger);
 	}).then(function (dir) {
 		logger.logStage('validating package');
 		return validatePackage(dir, functionConfig.Handler, apiConfig && apiConfig.module);
 	}).then(function (dir) {
 		packageDir = dir;
+		return cleanUpPackage(dir, options, logger);
+	}).then(function () {
+		if (requiresHandlerUpdate) {
+			return lambda.updateFunctionConfiguration({FunctionName: lambdaConfig.name, Handler: functionConfig.Handler}).promise();
+		}
+	}).then(function () {
+		logger.logStage('updating configuration');
+		return updateEnvVars(options, lambda, lambdaConfig.name);
+	}).then(function () {
 		logger.logStage('zipping package');
-		return zipdir(dir);
-	}).then(readFile)
-	.then(function (fileContents) {
+		return zipdir(packageDir);
+	}).then(function (zipFile) {
+		packageArchive = zipFile;
+		return lambdaCode(packageArchive, options['use-s3-bucket'], logger);
+	}).then(function (functionCode) {
 		logger.logStage('updating Lambda');
-		return lambda.updateFunctionCodePromise({FunctionName: lambdaConfig.name, ZipFile: fileContents, Publish: true});
+		s3Key = functionCode.S3Key;
+		functionCode.FunctionName = lambdaConfig.name;
+		functionCode.Publish = true;
+		return lambda.updateFunctionCode(functionCode).promise();
 	}).then(function (result) {
 		updateResult = result;
+		if (s3Key) {
+			updateResult.s3key = s3Key;
+		}
 		return result;
 	}).then(function (result) {
 		if (options.version) {
 			logger.logStage('setting version alias');
 			return markAlias(result.FunctionName, lambda, result.Version, options.version);
 		}
-	}).then(updateWebApi).then(function () {
-		return updateResult;
-	});
+	}).then(updateWebApi).then(cleanup);
 };
 module.exports.doc = {
 	description: 'Deploy a new version of the Lambda function using project files, update any associated web APIs',
@@ -133,6 +204,54 @@ module.exports.doc = {
 			optional: true,
 			description: 'Config file containing the resource names',
 			default: 'claudia.json'
+		},
+		{
+			argument: 'no-optional-dependencies',
+			optional: true,
+			description: 'Do not upload optional dependencies to Lambda.'
+		},
+		{
+			argument: 'use-local-dependencies',
+			optional: true,
+			description: 'Do not install dependencies, use local node_modules directory instead'
+		},
+		{
+			argument: 'cache-api-config',
+			optional: true,
+			example: 'claudiaConfigCache',
+			description: 'Name of the stage variable for storing the current API configuration signature.\n' +
+				'If set, it will also be used to check if the previously deployed configuration can be re-used and speed up deployment'
+		},
+		{
+			argument: 'keep',
+			optional: true,
+			description: 'keep the produced package archive on disk for troubleshooting purposes.\n' +
+				'If not set, the temporary files will be removed after the Lambda function is successfully created'
+		},
+		{
+			argument: 'use-s3-bucket',
+			optional: true,
+			example: 'claudia-uploads',
+			description: 'The name of a S3 bucket that Claudia will use to upload the function code before installing in Lambda.\n' +
+				'You can use this to upload large functions over slower connections more reliably, and to leave a binary artifact\n' +
+				'after uploads for auditing purposes. If not set, the archive will be uploaded directly to Lambda'
+		},
+		{
+			argument: 'set-env',
+			optional: true,
+			example: 'S3BUCKET=testbucket,SNSQUEUE=testqueue',
+			description: 'comma-separated list of VAR=VALUE environment variables to set'
+		},
+		{
+			argument: 'set-env-from-json',
+			optional: true,
+			example: 'production-env.json',
+			description: 'file path to a JSON file containing environment variables to set'
+		},
+		{
+			argument: 'env-kms-key-arn',
+			optional: true,
+			description: 'KMS Key ARN to encrypt/decrypt environment variables'
 		}
 	]
 };
